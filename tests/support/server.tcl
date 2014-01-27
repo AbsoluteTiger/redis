@@ -2,13 +2,14 @@ set ::global_overrides {}
 set ::tags {}
 set ::valgrind_errors {}
 
-proc error_and_quit {config_file error} {
-    puts "!!COULD NOT START REDIS-SERVER\n"
-    puts "CONFIGURATION:"
-    puts [exec cat $config_file]
-    puts "\nERROR:"
-    puts [string trim $error]
-    exit 1
+proc start_server_error {config_file error} {
+    set err {}
+    append err "Cant' start the Redis server\n"
+    append err "CONFIGURATION:"
+    append err [exec cat $config_file]
+    append err "\nERROR:"
+    append err [string trim $error]
+    send_data_packet $::test_server_fd err $err
 }
 
 proc check_valgrind_errors stderr {
@@ -16,7 +17,7 @@ proc check_valgrind_errors stderr {
     set buf [read $fd]
     close $fd
 
-    if {![regexp -- {ERROR SUMMARY: 0 errors} $buf] ||
+    if {[regexp -- { at 0x} $buf] ||
         (![regexp -- {definitely lost: 0 bytes} $buf] &&
          ![regexp -- {no leaks are possible} $buf])} {
         send_data_packet $::test_server_fd err "Valgrind error: $buf\n"
@@ -37,7 +38,9 @@ proc kill_server config {
             if {[string match {*Darwin*} [exec uname -a]]} {
                 tags {"leaks"} {
                     test "Check for memory leaks (pid $pid)" {
-                        exec leaks $pid
+                        set output {0 leaks}
+                        catch {exec leaks $pid} output
+                        set output
                     } {*0 leaks*}
                 }
             }
@@ -45,11 +48,16 @@ proc kill_server config {
     }
 
     # kill server and wait for the process to be totally exited
+    catch {exec kill $pid}
     while {[is_alive $config]} {
-        if {[incr wait 10] % 1000 == 0} {
+        incr wait 10
+
+        if {$wait >= 5000} {
+            puts "Forcing process $pid to exit..."
+            catch {exec kill -KILL $pid}
+        } elseif {$wait % 1000 == 0} {
             puts "Waiting for process $pid to exit..."
         }
-        catch {exec kill $pid}
         after 10
     }
 
@@ -76,8 +84,8 @@ proc ping_server {host port} {
         puts $fd "PING\r\n"
         flush $fd
         set reply [gets $fd]
-        if {[string range $reply 0 4] eq {+PONG} ||
-            [string range $reply 0 3] eq {-ERR}} {
+        if {[string range $reply 0 0] eq {+} ||
+            [string range $reply 0 0] eq {-}} {
             set retval 1
         }
         close $fd
@@ -101,7 +109,7 @@ proc tags {tags code} {
 }
 
 proc start_server {options {code undefined}} {
-    # If we are runnign against an external server, we just push the
+    # If we are running against an external server, we just push the
     # host/port pair in the stack the first time
     if {$::external} {
         if {[llength $::servers] == 0} {
@@ -175,14 +183,14 @@ proc start_server {options {code undefined}} {
     set stderr [format "%s/%s" [dict get $config "dir"] "stderr"]
 
     if {$::valgrind} {
-        exec valgrind --suppressions=src/valgrind.sup src/redis-server $config_file > $stdout 2> $stderr &
+        exec valgrind --suppressions=src/valgrind.sup --show-reachable=no --show-possibly-lost=no --leak-check=full src/redis-server $config_file > $stdout 2> $stderr &
     } else {
         exec src/redis-server $config_file > $stdout 2> $stderr &
     }
     
     # check that the server actually started
     # ugly but tries to be as fast as possible...
-    set retrynum 100
+    if {$::valgrind} {set retrynum 1000} else {set retrynum 100}
     set serverisup 0
 
     if {$::verbose} {
@@ -209,7 +217,10 @@ proc start_server {options {code undefined}} {
     }
 
     if {!$serverisup} {
-        error_and_quit $config_file [exec cat $stderr]
+        set err {}
+        append err [exec cat $stdout] "\n" [exec cat $stderr]
+        start_server_error $config_file $err
+        return
     }
     
     # find out the pid
@@ -243,7 +254,7 @@ proc start_server {options {code undefined}} {
 
         while 1 {
             # check that the server actually started and is ready for connections
-            if {[exec cat $stdout | grep "ready to accept" | wc -l] > 0} {
+            if {[exec grep "ready to accept" | wc -l < $stdout] > 0} {
                 break
             }
             after 10

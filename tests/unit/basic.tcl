@@ -120,7 +120,19 @@ start_server {tags {"basic"}} {
         r incrby novar 17179869184
     } {34359738368}
 
-    test {INCR fails against key with spaces (no integer encoded)} {
+    test {INCR fails against key with spaces (left)} {
+        r set novar "    11"
+        catch {r incr novar} err
+        format $err
+    } {ERR*}
+
+    test {INCR fails against key with spaces (right)} {
+        r set novar "11    "
+        catch {r incr novar} err
+        format $err
+    } {ERR*}
+
+    test {INCR fails against key with spaces (both)} {
         r set novar "    11    "
         catch {r incr novar} err
         format $err
@@ -131,12 +143,80 @@ start_server {tags {"basic"}} {
         catch {r incr mylist} err
         r rpop mylist
         format $err
-    } {ERR*}
+    } {WRONGTYPE*}
 
     test {DECRBY over 32bit value with over 32bit increment, negative res} {
         r set novar 17179869184
         r decrby novar 17179869185
     } {-1}
+
+    test {INCRBYFLOAT against non existing key} {
+        r del novar
+        list    [roundFloat [r incrbyfloat novar 1]] \
+                [roundFloat [r get novar]] \
+                [roundFloat [r incrbyfloat novar 0.25]] \
+                [roundFloat [r get novar]]
+    } {1 1 1.25 1.25}
+
+    test {INCRBYFLOAT against key originally set with SET} {
+        r set novar 1.5
+        roundFloat [r incrbyfloat novar 1.5]
+    } {3}
+
+    test {INCRBYFLOAT over 32bit value} {
+        r set novar 17179869184
+        r incrbyfloat novar 1.5
+    } {17179869185.5}
+
+    test {INCRBYFLOAT over 32bit value with over 32bit increment} {
+        r set novar 17179869184
+        r incrbyfloat novar 17179869184
+    } {34359738368}
+
+    test {INCRBYFLOAT fails against key with spaces (left)} {
+        set err {}
+        r set novar "    11"
+        catch {r incrbyfloat novar 1.0} err
+        format $err
+    } {ERR*valid*}
+
+    test {INCRBYFLOAT fails against key with spaces (right)} {
+        set err {}
+        r set novar "11    "
+        catch {r incrbyfloat novar 1.0} err
+        format $err
+    } {ERR*valid*}
+
+    test {INCRBYFLOAT fails against key with spaces (both)} {
+        set err {}
+        r set novar " 11 "
+        catch {r incrbyfloat novar 1.0} err
+        format $err
+    } {ERR*valid*}
+
+    test {INCRBYFLOAT fails against a key holding a list} {
+        r del mylist
+        set err {}
+        r rpush mylist 1
+        catch {r incrbyfloat mylist 1.0} err
+        r del mylist
+        format $err
+    } {WRONGTYPE*}
+
+    test {INCRBYFLOAT does not allow NaN or Infinity} {
+        r set foo 0
+        set err {}
+        catch {r incrbyfloat foo +inf} err
+        set err
+        # p.s. no way I can force NaN to test it from the API because
+        # there is no way to increment / decrement by infinity nor to
+        # perform divisions.
+    } {ERR*would produce*}
+
+    test {INCRBYFLOAT decrement} {
+        r set foo 1
+        roundFloat [r incrbyfloat foo -1.1]
+    } {-0.1}
 
     test "SETNX target key missing" {
         r del novar
@@ -451,7 +531,7 @@ start_server {tags {"basic"}} {
     test "SETBIT against key with wrong type" {
         r del mykey
         r lpush mykey "foo"
-        assert_error "*wrong kind*" {r setbit mykey 0 1}
+        assert_error "WRONGTYPE*" {r setbit mykey 0 1}
     }
 
     test "SETBIT with out of range bit offset" {
@@ -585,7 +665,7 @@ start_server {tags {"basic"}} {
     test "SETRANGE against key with wrong type" {
         r del mykey
         r lpush mykey "foo"
-        assert_error "*wrong kind*" {r setrange mykey 0 bar}
+        assert_error "WRONGTYPE*" {r setrange mykey 0 bar}
     }
 
     test "SETRANGE with out of range offset" {
@@ -632,4 +712,53 @@ start_server {tags {"basic"}} {
             assert_equal [string range $bin $_start $_end] [r getrange bin $start $end]
         }
     }
+
+    test {Extended SET can detect syntax errors} {
+        set e {}
+        catch {r set foo bar non-existing-option} e
+        set e
+    } {*syntax*}
+
+    test {Extended SET NX option} {
+        r del foo
+        set v1 [r set foo 1 nx]
+        set v2 [r set foo 2 nx]
+        list $v1 $v2 [r get foo]
+    } {OK {} 1}
+
+    test {Extended SET XX option} {
+        r del foo
+        set v1 [r set foo 1 xx]
+        r set foo bar
+        set v2 [r set foo 2 xx]
+        list $v1 $v2 [r get foo]
+    } {{} OK 2}
+
+    test {Extended SET EX option} {
+        r del foo
+        r set foo bar ex 10
+        set ttl [r ttl foo]
+        assert {$ttl <= 10 && $ttl > 5}
+    }
+
+    test {Extended SET PX option} {
+        r del foo
+        r set foo bar px 10000
+        set ttl [r ttl foo]
+        assert {$ttl <= 10 && $ttl > 5}
+    }
+
+    test {Extended SET using multiple options at once} {
+        r set foo val
+        assert {[r set foo bar xx px 10000] eq {OK}}
+        set ttl [r ttl foo]
+        assert {$ttl <= 10 && $ttl > 5}
+    }
+
+    test {KEYS * two times with long key, Github issue #1208} {
+        r flushdb
+        r set dlskeriewrioeuwqoirueioqwrueoqwrueqw test
+        r keys *
+        r keys *
+    } {dlskeriewrioeuwqoirueioqwrueoqwrueqw}
 }

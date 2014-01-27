@@ -31,14 +31,20 @@ tags {"aof"} {
     }
 
     start_server_aof [list dir $server_path] {
-        test "Unfinished MULTI: Server should not have been started" {
-            if {$::valgrind} {after 2000}
-            assert_equal 0 [is_alive $srv]
-        }
-
         test "Unfinished MULTI: Server should have logged an error" {
-            set result [exec cat [dict get $srv stdout] | tail -n1]
-            assert_match "*Unexpected end of file reading the append only file*" $result
+            set pattern "*Unexpected end of file reading the append only file*"
+            set retry 10
+            while {$retry} {
+                set result [exec tail -n1 < [dict get $srv stdout]]
+                if {[string match $pattern $result]} {
+                    break
+                }
+                incr retry -1
+                after 1000
+            }
+            if {$retry == 0} {
+                error "assertion:expected error not found on config file"
+            }
         }
     }
 
@@ -49,14 +55,20 @@ tags {"aof"} {
     }
 
     start_server_aof [list dir $server_path] {
-        test "Short read: Server should not have been started" {
-            if {$::valgrind} {after 2000}
-            assert_equal 0 [is_alive $srv]
-        }
-
         test "Short read: Server should have logged an error" {
-            set result [exec cat [dict get $srv stdout] | tail -n1]
-            assert_match "*Bad file format reading the append only file*" $result
+            set pattern "*Bad file format reading the append only file*"
+            set retry 10
+            while {$retry} {
+                set result [exec tail -n1 < [dict get $srv stdout]]
+                if {[string match $pattern $result]} {
+                    break
+                }
+                incr retry -1
+                after 1000
+            }
+            if {$retry == 0} {
+                error "assertion:expected error not found on config file"
+            }
         }
     }
 
@@ -69,7 +81,7 @@ tags {"aof"} {
     }
 
     test "Short read: Utility should be able to fix the AOF" {
-        set result [exec echo y | src/redis-check-aof --fix $aof_path]
+        set result [exec src/redis-check-aof --fix $aof_path << "y\n"]
         assert_match "*Successfully truncated AOF*" $result
     }
 
@@ -86,7 +98,7 @@ tags {"aof"} {
         }
     }
 
-    ## Test that SPOP (that modifies the client its argc/argv) is correctly free'd
+    ## Test that SPOP (that modifies the client's argc/argv) is correctly free'd
     create_aof {
         append_to_aof [formatCommand sadd set foo]
         append_to_aof [formatCommand sadd set bar]
